@@ -232,7 +232,42 @@ jobs:
             fi
           done
 
-      # 13. Xcode archive (unsigned)
+      # 13. Eksik kaynak dizinleri oluştur
+      # Xcode projesi x86_64-vcruntime, aarch64-windows, arm64ec-windows dizinlerini
+      # kaynak olarak bekliyor. Repo'da bulunmayan dizinleri boş stub olarak oluştur.
+      - name: Create missing resource directories
+        run: |
+          # x86_64-vcruntime: Wine'ın x86-64 VC++ runtime DLL'leri
+          # (vcruntime140.dll, msvcp140.dll vb.)
+          # Gerçek DLL'ler Wine PE build'inden gelir; şimdilik boş stub.
+          if [ ! -d "app/Madeira/x86_64-vcruntime" ]; then
+            mkdir -p app/Madeira/x86_64-vcruntime
+            echo "Created stub: x86_64-vcruntime/"
+          fi
+          # aarch64-windows: ARM64 Windows PE dosyaları
+          if [ ! -d "app/Madeira/aarch64-windows" ]; then
+            mkdir -p app/Madeira/aarch64-windows
+            echo "Created stub: aarch64-windows/"
+          fi
+          # arm64ec-windows: ARM64EC Windows PE dosyaları
+          if [ ! -d "app/Madeira/arm64ec-windows" ]; then
+            mkdir -p app/Madeira/arm64ec-windows
+            echo "Created stub: arm64ec-windows/"
+          fi
+          # nls: Wine's NLS (National Language Support) data files
+          if [ ! -d "app/Madeira/nls" ]; then
+            mkdir -p app/Madeira/nls
+            echo "Created stub: nls/"
+          fi
+          # legal: Lisans dosyaları
+          if [ ! -d "app/Madeira/legal" ]; then
+            mkdir -p app/Madeira/legal
+            echo "Created stub: legal/"
+          fi
+          echo "Resource directories ready:"
+          ls app/Madeira/ | grep -v '\.'
+
+      # 14. Xcode archive (unsigned)
       - name: Build Xcode project (unsigned archive)
         run: |
           # Mevcut scheme'leri listele (debug)

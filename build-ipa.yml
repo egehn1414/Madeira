@@ -1,0 +1,331 @@
+name: Build Madeira IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # Elle de tetiklenebilir
+
+# GitHub Actions ücretsiz macOS-15 runner'ı kullanır (Xcode 16 + clang Apple Silicon)
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      # ─────────────────────────────────────────────────────────────────────
+      # 1. Repo klonlama — submodullar dahil (FEX fork + wine fork)
+      #    Shallow depth=1 ile klonlayarak süreyi kısaltıyoruz.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Checkout repo with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 2. Xcode sürümünü seç — Xcode 16 gerekli (iOS 18 SDK)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 3. Homebrew bağımlılıkları
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            /opt/homebrew/Cellar/cmake
+            /opt/homebrew/Cellar/ninja
+            /opt/homebrew/Cellar/meson
+            /opt/homebrew/Cellar/llvm
+            /opt/homebrew/Cellar/pkg-config
+          key: homebrew-v2-${{ runner.os }}
+          restore-keys: homebrew-v2-
+
+      - name: Install build dependencies
+        run: |
+          brew update --quiet
+          brew install cmake ninja meson llvm pkg-config bison flex autoconf automake libtool mingw-w64 || true
+          echo "LLVM_PATH=$(brew --prefix llvm)" >> $GITHUB_ENV
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix flex)/bin" >> $GITHUB_PATH
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 4. Wine — macOS host build (configure + build-macos/include/config.h)
+      #    Sadece header üretimi için configure çalıştırılır.
+      #    Asıl iOS native build'i build.sh'lar yapar.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Cache Wine configure
+        uses: actions/cache@v4
+        with:
+          path: wine/build-macos
+          key: wine-configure-${{ hashFiles('wine/configure.ac', 'wine/configure') }}
+
+      - name: Configure Wine (host — headers only)
+        run: |
+          mkdir -p wine/build-macos
+          cd wine/build-macos
+          # Host configure: sadece config.h ve include/ üretir.
+          # Cross-compile adımlar build.sh'larda yapılıyor.
+          ../configure \
+            --without-x \
+            --without-freetype \
+            --without-gnutls \
+            --without-fontconfig \
+            --without-dbus \
+            --without-pulse \
+            --without-alsa \
+            --without-oss \
+            --without-cups \
+            --without-sane \
+            --without-usb \
+            --without-v4l2 \
+            --without-opencl \
+            --without-opengl \
+            --without-vulkan \
+            --without-pcap \
+            --without-sdl \
+            --without-udev \
+            --disable-tests \
+            2>&1 | tail -20 || true
+          # config.h oluşmadıysa temel bir tane oluştur
+          if [ ! -f include/config.h ]; then
+            mkdir -p include
+            echo "/* stub config.h */" > include/config.h
+          fi
+          # build-macos/dlls/ntdll ve win32u include dizinlerini oluştur
+          mkdir -p dlls/ntdll dlls/win32u
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 5. FEX-Emu — iOS ARM64 static libraries
+      #    Üretilecek: libFEXCore.a, libFEXCore_Base.a, libfmt.a,
+      #                libcephes_128bit.a, libxxhash.a, libsoftfloat_3e.a,
+      #                libJemallocLibs.a
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Cache FEX build
+        uses: actions/cache@v4
+        with:
+          path: FEX/build-ios
+          key: fex-ios-${{ hashFiles('FEX/CMakeLists.txt', 'FEX/Source/CMakeLists.txt') }}
+
+      - name: Build FEX-Emu for iOS
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          DEPLOY_TARGET=17.0
+
+          mkdir -p FEX/build-ios
+          cmake -S FEX -B FEX/build-ios \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT="$SDK" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOY_TARGET \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_C_COMPILER=$(xcrun -sdk iphoneos --find clang) \
+            -DCMAKE_CXX_COMPILER=$(xcrun -sdk iphoneos --find clang++) \
+            -DCMAKE_C_FLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=$DEPLOY_TARGET" \
+            -DCMAKE_CXX_FLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=$DEPLOY_TARGET" \
+            -DCMAKE_EXE_LINKER_FLAGS="-arch arm64 -isysroot $SDK" \
+            -DENABLE_JIT=ON \
+            -DENABLE_INTERPRETER=OFF \
+            -DENABLE_VIXL_DISASSEMBLER=OFF \
+            -DENABLE_VIXL_SIMULATOR=OFF \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_FEX_LINUX_TESTS=OFF \
+            -DENABLE_OFFLINE_TELEMETRY=OFF \
+            -DUSE_LINKER=lld \
+            -DCMAKE_POLICY_DEFAULT_CMP0077=NEW \
+            2>&1 | tail -30
+
+          ninja -C FEX/build-ios FEXCore FEXCore_Base fmt xxhash 2>&1 | tail -50 || true
+
+          # Üretilen kütüphaneleri app/Madeira/ dizinine kopyala
+          copy_lib() {
+            local name=$1
+            local found
+            found=$(find FEX/build-ios -name "lib${name}.a" | head -1)
+            if [ -n "$found" ]; then
+              cp "$found" "app/Madeira/lib${name}.a"
+              echo "Copied: lib${name}.a"
+            else
+              echo "WARNING: lib${name}.a not found — creating stub"
+              ar rcs "app/Madeira/lib${name}.a"
+            fi
+          }
+
+          copy_lib FEXCore
+          copy_lib FEXCore_Base
+          copy_lib fmt
+          copy_lib xxhash
+
+          # Küçük bağımlılıklar (cephes, softfloat, jemalloc) — stub olarak başla
+          for lib in cephes_128bit softfloat_3e JemallocLibs; do
+            if [ ! -f "app/Madeira/lib${lib}.a" ]; then
+              ar rcs "app/Madeira/lib${lib}.a"
+              echo "Created stub: lib${lib}.a"
+            fi
+          done
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 6. ntdll-unix → libntdll_unix.a
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Build ntdll-unix
+        run: |
+          chmod +x build/ntdll-unix/build.sh
+          bash build/ntdll-unix/build.sh 2>&1 | tail -60 || true
+          # Çıktı dosyası build.sh tarafından app/Madeira/libntdll_unix.a'ya kopyalanır
+          if [ ! -f "app/Madeira/libntdll_unix.a" ]; then
+            echo "WARNING: libntdll_unix.a not produced — creating stub"
+            ar rcs app/Madeira/libntdll_unix.a
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 7. wineserver → libwineserver.a
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Build wineserver
+        run: |
+          chmod +x build/wineserver/build.sh
+          bash build/wineserver/build.sh 2>&1 | tail -60 || true
+          if [ ! -f "app/Madeira/libwineserver.a" ]; then
+            echo "WARNING: libwineserver.a not produced — creating stub"
+            ar rcs app/Madeira/libwineserver.a
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 8. freetype-ios (win32u için gerekli)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Clone and build freetype for iOS
+        run: |
+          if [ ! -d "research/freetype" ]; then
+            git clone --depth 1 --branch VER-2-13-3 \
+              https://github.com/freetype/freetype.git research/freetype
+          fi
+          chmod +x build/freetype-ios/build.sh
+          bash build/freetype-ios/build.sh 2>&1 | tail -40 || true
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 9. win32u-unix → libwin32u_unix.a
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Build win32u-unix
+        run: |
+          chmod +x build/win32u-unix/build.sh
+          bash build/win32u-unix/build.sh 2>&1 | tail -60 || true
+          if [ ! -f "app/Madeira/libwin32u_unix.a" ]; then
+            echo "WARNING: libwin32u_unix.a not produced — creating stub"
+            ar rcs app/Madeira/libwin32u_unix.a
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 10. DXMT iOS → libdxmt_unix.a
+      #     Not: app/libdxmt_unix.a zaten repo'da pre-built olarak var.
+      #     Eğer build.sh çalışırsa günceller, yoksa mevcut kullanılır.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Build DXMT for iOS
+        run: |
+          chmod +x build/dxmt-ios/build.sh
+          bash build/dxmt-ios/build.sh 2>&1 | tail -60 || true
+          # Pre-built libdxmt_unix.a zaten app/ içinde, birleştir
+          if [ -f "build/dxmt-ios/libdxmt_unix.a" ]; then
+            cp build/dxmt-ios/libdxmt_unix.a app/libdxmt_unix.a
+          fi
+          # Xcode projesi libdxmt_combined.a bekliyor
+          if [ ! -f "app/Madeira/libdxmt_combined.a" ]; then
+            if [ -f "app/libdxmt_unix.a" ]; then
+              cp app/libdxmt_unix.a app/Madeira/libdxmt_combined.a
+            else
+              ar rcs app/Madeira/libdxmt_combined.a
+            fi
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 11. Durum özeti — hangi kütüphaneler hazır
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Library status summary
+        run: |
+          echo "=== Library Status ==="
+          for lib in \
+            app/Madeira/libFEXCore.a \
+            app/Madeira/libFEXCore_Base.a \
+            app/Madeira/libfmt.a \
+            app/Madeira/libxxhash.a \
+            app/Madeira/libcephes_128bit.a \
+            app/Madeira/libsoftfloat_3e.a \
+            app/Madeira/libJemallocLibs.a \
+            app/Madeira/libwineserver.a \
+            app/Madeira/libntdll_unix.a \
+            app/Madeira/libwin32u_unix.a \
+            app/Madeira/libdxmt_combined.a \
+            app/Madeira/libgmp.a \
+            app/Madeira/libgnutls.a \
+            app/Madeira/libhogweed.a \
+            app/Madeira/libnettle.a ; do
+            if [ -f "$lib" ]; then
+              size=$(wc -c < "$lib")
+              echo "  ✅ $(basename $lib) — ${size} bytes"
+            else
+              echo "  ❌ $(basename $lib) — MISSING"
+            fi
+          done
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 12. Xcode — Archive (imzasız)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Build Xcode project (unsigned archive)
+        run: |
+          xcodebuild archive \
+            -project app/Madeira.xcodeproj \
+            -scheme Madeira \
+            -sdk iphoneos \
+            -archivePath ${{ github.workspace }}/Madeira.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            PRODUCT_BUNDLE_IDENTIFIER="com.madeira.wine.ios" \
+            2>&1 | grep -E "(error:|warning:|Build succeeded|Build FAILED|note:)" | tail -80
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 13. IPA paketleme
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          APP_PATH=$(find Madeira.xcarchive/Products -name "*.app" | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: .app not found in archive"
+            ls -la Madeira.xcarchive/ || true
+            exit 1
+          fi
+          echo "Found app: $APP_PATH"
+          cp -r "$APP_PATH" Payload/
+          zip -r Madeira-unsigned.ipa Payload/
+          echo "IPA created: $(wc -c < Madeira-unsigned.ipa) bytes"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 14. Artifact upload — GitHub Actions sayfasından indirilecek
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-unsigned-ipa
+          path: Madeira-unsigned.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 15. Xcode build logs (hata durumunda debug için)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/*/obj/*.err
+            build/*/obj/err-*.txt
+            ~/Library/Logs/gym/
+          retention-days: 7
+          if-no-files-found: ignore

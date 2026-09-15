@@ -18,11 +18,35 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      # 2. Xcode 16
-      - name: Select Xcode 16
-        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+      # 2. Patch ContentView.swift (remove unsupported iOS 26 glassEffect API)
+      - name: Patch ContentView.swift
+        run: |
+          python3 -c "
+          with open('app/Madeira/ContentView.swift', 'r', encoding='utf-8') as f:
+              lines = f.readlines()
+          out = []
+          for line in lines:
+              if 'Circle().fill(.clear).glassEffect' in line:
+                  out.append(line.replace('Circle().fill(.clear).glassEffect(.regular, in: Circle())', 'Circle().fill(.ultraThinMaterial)'))
+              elif 'else { RoundedRectangle(cornerRadius: 18).fill(.clear)' in line:
+                  out.append(line.replace('fill(.clear)', 'fill(.ultraThinMaterial) }\n'))
+              elif '.glassEffect(.regular, in: RoundedRectangle' in line:
+                  continue
+              else:
+                  out.append(line)
+          with open('app/Madeira/ContentView.swift', 'w', encoding='utf-8') as f:
+              f.writelines(out)
+          print('Successfully patched ContentView.swift!')
+          "
 
-      # 3. Homebrew
+      # 3. Select Xcode 16
+      - name: Select Xcode 16
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer || sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      # 4. Homebrew
       - name: Cache Homebrew packages
         uses: actions/cache@v4
         with:
@@ -40,9 +64,7 @@ jobs:
           echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
           echo "$(brew --prefix flex)/bin"  >> $GITHUB_PATH
 
-      # 4. Stub library helper
-      # macOS'ta 'ar rcs lib.a' sifir obje ile CALISMAZ.
-      # Heredoc YAML run: icinde syntax hatasi verdigindan printf ile yaziliyor.
+      # 5. Stub library helper
       - name: Setup stub library helper
         run: |
           STUB=/usr/local/bin/make_stub_lib.sh
@@ -58,7 +80,7 @@ jobs:
           printf 'echo "Stub OK: $(basename $lib)"\n'                                                                >> "$STUB"
           chmod +x "$STUB"
 
-      # 5. Wine configure (headers only)
+      # 6. Wine configure (headers only)
       - name: Cache Wine configure
         uses: actions/cache@v4
         with:
@@ -96,9 +118,7 @@ jobs:
           fi
           mkdir -p dlls/ntdll dlls/win32u
 
-      # 6. FEX-Emu for iOS
-      # DUZELTILDI: CMAKE_SYSTEM_PROCESSOR=arm64 (yoksa FEX "Unsupported processor" verir)
-      # DUZELTILDI: CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY (iOS'ta exe link patlar)
+      # 7. FEX-Emu for iOS
       - name: Cache FEX build
         uses: actions/cache@v4
         with:
@@ -151,7 +171,7 @@ jobs:
             fi
           done
 
-      # 7. ntdll-unix
+      # 8. ntdll-unix
       - name: Build ntdll-unix
         run: |
           chmod +x build/ntdll-unix/build.sh
@@ -160,7 +180,7 @@ jobs:
             bash /usr/local/bin/make_stub_lib.sh app/Madeira/libntdll_unix.a
           fi
 
-      # 8. wineserver
+      # 9. wineserver
       - name: Build wineserver
         run: |
           chmod +x build/wineserver/build.sh
@@ -169,7 +189,7 @@ jobs:
             bash /usr/local/bin/make_stub_lib.sh app/Madeira/libwineserver.a
           fi
 
-      # 9. freetype for iOS
+      # 10. freetype for iOS
       - name: Clone and build freetype for iOS
         run: |
           if [ ! -d "research/freetype" ]; then
@@ -179,7 +199,7 @@ jobs:
           chmod +x build/freetype-ios/build.sh
           bash build/freetype-ios/build.sh 2>&1 | tail -40 || true
 
-      # 10. win32u-unix
+      # 11. win32u-unix
       - name: Build win32u-unix
         run: |
           chmod +x build/win32u-unix/build.sh
@@ -188,7 +208,7 @@ jobs:
             bash /usr/local/bin/make_stub_lib.sh app/Madeira/libwin32u_unix.a
           fi
 
-      # 11. DXMT for iOS
+      # 12. DXMT for iOS
       - name: Build DXMT for iOS
         run: |
           chmod +x build/dxmt-ios/build.sh
@@ -204,7 +224,7 @@ jobs:
             fi
           fi
 
-      # 12. Library status
+      # 13. Library status
       - name: Library status summary
         run: |
           echo "=== Library Status ==="
@@ -232,34 +252,25 @@ jobs:
             fi
           done
 
-      # 13. Eksik kaynak dizinleri oluştur
-      # Xcode projesi x86_64-vcruntime, aarch64-windows, arm64ec-windows dizinlerini
-      # kaynak olarak bekliyor. Repo'da bulunmayan dizinleri boş stub olarak oluştur.
+      # 14. Eksik kaynak dizinleri oluştur
       - name: Create missing resource directories
         run: |
-          # x86_64-vcruntime: Wine'ın x86-64 VC++ runtime DLL'leri
-          # (vcruntime140.dll, msvcp140.dll vb.)
-          # Gerçek DLL'ler Wine PE build'inden gelir; şimdilik boş stub.
           if [ ! -d "app/Madeira/x86_64-vcruntime" ]; then
             mkdir -p app/Madeira/x86_64-vcruntime
             echo "Created stub: x86_64-vcruntime/"
           fi
-          # aarch64-windows: ARM64 Windows PE dosyaları
           if [ ! -d "app/Madeira/aarch64-windows" ]; then
             mkdir -p app/Madeira/aarch64-windows
             echo "Created stub: aarch64-windows/"
           fi
-          # arm64ec-windows: ARM64EC Windows PE dosyaları
           if [ ! -d "app/Madeira/arm64ec-windows" ]; then
             mkdir -p app/Madeira/arm64ec-windows
             echo "Created stub: arm64ec-windows/"
           fi
-          # nls: Wine's NLS (National Language Support) data files
           if [ ! -d "app/Madeira/nls" ]; then
             mkdir -p app/Madeira/nls
             echo "Created stub: nls/"
           fi
-          # legal: Lisans dosyaları
           if [ ! -d "app/Madeira/legal" ]; then
             mkdir -p app/Madeira/legal
             echo "Created stub: legal/"
@@ -267,13 +278,11 @@ jobs:
           echo "Resource directories ready:"
           ls app/Madeira/ | grep -v '\.'
 
-      # 14. Xcode archive (unsigned)
+      # 15. Xcode archive (unsigned)
       - name: Build Xcode project (unsigned archive)
         run: |
-          # Mevcut scheme'leri listele (debug)
           xcodebuild -project app/Madeira.xcodeproj -list 2>&1 || true
 
-          # Archive — tüm çıktıyı göster (grep filtresi kaldırıldı, hataları maskeliyordu)
           xcodebuild archive \
             -project app/Madeira.xcodeproj \
             -scheme Madeira \
@@ -288,7 +297,6 @@ jobs:
             OTHER_CODE_SIGN_FLAGS="--deep" \
             2>&1 | tee /tmp/xcodebuild.log | tail -150
 
-          # Archive oluştu mu kontrol et
           if [ ! -d "$GITHUB_WORKSPACE/Madeira.xcarchive" ]; then
             echo "ERROR: Archive not created. Full log:"
             cat /tmp/xcodebuild.log
@@ -297,7 +305,7 @@ jobs:
           echo "Archive created successfully"
           ls -la "$GITHUB_WORKSPACE/Madeira.xcarchive/Products/" || true
 
-      # 14. Package IPA
+      # 16. Package IPA
       - name: Package unsigned IPA
         run: |
           mkdir -p Payload
@@ -312,7 +320,7 @@ jobs:
           zip -r Madeira-unsigned.ipa Payload/
           echo "IPA: $(wc -c < Madeira-unsigned.ipa) bytes"
 
-      # 15. Upload IPA
+      # 17. Upload IPA
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
@@ -321,7 +329,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      # 16. Upload logs on failure
+      # 18. Upload logs on failure
       - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

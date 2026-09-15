@@ -235,6 +235,10 @@ jobs:
       # 13. Xcode archive (unsigned)
       - name: Build Xcode project (unsigned archive)
         run: |
+          # Mevcut scheme'leri listele (debug)
+          xcodebuild -project app/Madeira.xcodeproj -list 2>&1 || true
+
+          # Archive — tüm çıktıyı göster (grep filtresi kaldırıldı, hataları maskeliyordu)
           xcodebuild archive \
             -project app/Madeira.xcodeproj \
             -scheme Madeira \
@@ -243,18 +247,29 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_ALLOWED_FOR_APPS=NO \
             DEVELOPMENT_TEAM="" \
             PRODUCT_BUNDLE_IDENTIFIER="com.madeira.wine.ios" \
-            2>&1 | grep -E "(error:|Build succeeded|Build FAILED)" | tail -80
+            OTHER_CODE_SIGN_FLAGS="--deep" \
+            2>&1 | tee /tmp/xcodebuild.log | tail -150
+
+          # Archive oluştu mu kontrol et
+          if [ ! -d "$GITHUB_WORKSPACE/Madeira.xcarchive" ]; then
+            echo "ERROR: Archive not created. Full log:"
+            cat /tmp/xcodebuild.log
+            exit 1
+          fi
+          echo "Archive created successfully"
+          ls -la "$GITHUB_WORKSPACE/Madeira.xcarchive/Products/" || true
 
       # 14. Package IPA
       - name: Package unsigned IPA
         run: |
           mkdir -p Payload
-          APP_PATH=$(find Madeira.xcarchive/Products -name "*.app" | head -1)
+          APP_PATH=$(find "$GITHUB_WORKSPACE/Madeira.xcarchive/Products" -name "*.app" | head -1)
           if [ -z "$APP_PATH" ]; then
             echo "ERROR: .app not found in archive"
-            ls -la Madeira.xcarchive/ || true
+            find "$GITHUB_WORKSPACE/Madeira.xcarchive" -type f | head -30
             exit 1
           fi
           echo "Found: $APP_PATH"
@@ -278,6 +293,7 @@ jobs:
         with:
           name: build-logs
           path: |
+            /tmp/xcodebuild.log
             build/*/obj/*.err
             build/*/obj/err-*.txt
           retention-days: 7

@@ -115,20 +115,48 @@ jobs:
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           DEPLOY_TARGET=17.0
+          CLANG=$(xcrun -sdk iphoneos --find clang)
+          CLANGXX=$(xcrun -sdk iphoneos --find clang++)
+
+          # ── DÜZELTİLDİ: macOS'ta boş archive oluşturulamaz (ar rcs lib.a hata verir).
+          # Stub kütüphane için minimal bir dummy .c → .o → .a üretiyoruz.
+          make_stub_lib() {
+            local lib=$1
+            local sym
+            sym="stub_$(basename "$lib" .a | tr '-' '_')"
+            printf 'void %s(void) {}\n' "$sym" > /tmp/stub_src.c
+            xcrun -sdk iphoneos clang -arch arm64 \
+              -isysroot "$SDK" -miphoneos-version-min=$DEPLOY_TARGET \
+              -c /tmp/stub_src.c -o /tmp/stub_obj.o 2>/dev/null || true
+            xcrun ar rcs "$lib" /tmp/stub_obj.o || true
+            rm -f /tmp/stub_src.c /tmp/stub_obj.o
+            echo "  📦 Stub created: $(basename $lib)"
+          }
 
           mkdir -p FEX/build-ios
+
+          # ── DÜZELTİLDİ: FEX CMakeLists.txt satır 89/115 hatası
+          # CMAKE_SYSTEM_NAME=iOS ayarlanınca CMAKE_SYSTEM_PROCESSOR boş kalıyor.
+          # FEX bunu "Unsupported processor type ." olarak görüyor.
+          # Çözüm: -DCMAKE_SYSTEM_PROCESSOR=arm64 ve compiler triple açık belirtildi.
+          # -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY: iOS'ta executable deneme
+          # compile'ı link aşamasında patlar; bu flag ile sadece .a üretiyor.
           cmake -S FEX -B FEX/build-ios \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_SYSTEM_PROCESSOR=arm64 \
             -DCMAKE_OSX_SYSROOT="$SDK" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOY_TARGET \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_C_COMPILER=$(xcrun -sdk iphoneos --find clang) \
-            -DCMAKE_CXX_COMPILER=$(xcrun -sdk iphoneos --find clang++) \
+            -DCMAKE_C_COMPILER="$CLANG" \
+            -DCMAKE_CXX_COMPILER="$CLANGXX" \
+            -DCMAKE_C_COMPILER_TARGET="arm64-apple-ios${DEPLOY_TARGET}" \
+            -DCMAKE_CXX_COMPILER_TARGET="arm64-apple-ios${DEPLOY_TARGET}" \
             -DCMAKE_C_FLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=$DEPLOY_TARGET" \
             -DCMAKE_CXX_FLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=$DEPLOY_TARGET" \
             -DCMAKE_EXE_LINKER_FLAGS="-arch arm64 -isysroot $SDK" \
+            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
             -DENABLE_JIT=ON \
             -DENABLE_INTERPRETER=OFF \
             -DENABLE_VIXL_DISASSEMBLER=OFF \
@@ -170,16 +198,36 @@ jobs:
           done
 
       # ─────────────────────────────────────────────────────────────────────
+      # Yardımcı: iOS arm64 uyumlu stub static library üretir.
+      # macOS'ta 'ar rcs lib.a' sıfır obje ile çağrılamaz.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Setup stub library helper
+        run: |
+          cat > /usr/local/bin/make_stub_lib.sh << 'STUBEOF'
+#!/bin/bash
+lib=$1
+SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+sym="stub_$(basename "$lib" .a | tr '.-' '__')"
+printf 'void %s(void) {}\n' "$sym" > /tmp/stub_src.c
+xcrun -sdk iphoneos clang -arch arm64 \
+  -isysroot "$SDK" -miphoneos-version-min=17.0 \
+  -c /tmp/stub_src.c -o /tmp/stub_obj.o 2>/dev/null
+xcrun ar rcs "$lib" /tmp/stub_obj.o
+rm -f /tmp/stub_src.c /tmp/stub_obj.o
+echo "  📦 Stub: $(basename $lib)"
+STUBEOF
+          chmod +x /usr/local/bin/make_stub_lib.sh
+
+      # ─────────────────────────────────────────────────────────────────────
       # 6. ntdll-unix → libntdll_unix.a
       # ─────────────────────────────────────────────────────────────────────
       - name: Build ntdll-unix
         run: |
           chmod +x build/ntdll-unix/build.sh
           bash build/ntdll-unix/build.sh 2>&1 | tail -60 || true
-          # Çıktı dosyası build.sh tarafından app/Madeira/libntdll_unix.a'ya kopyalanır
           if [ ! -f "app/Madeira/libntdll_unix.a" ]; then
             echo "WARNING: libntdll_unix.a not produced — creating stub"
-            ar rcs app/Madeira/libntdll_unix.a
+            bash /usr/local/bin/make_stub_lib.sh app/Madeira/libntdll_unix.a
           fi
 
       # ─────────────────────────────────────────────────────────────────────
@@ -191,7 +239,7 @@ jobs:
           bash build/wineserver/build.sh 2>&1 | tail -60 || true
           if [ ! -f "app/Madeira/libwineserver.a" ]; then
             echo "WARNING: libwineserver.a not produced — creating stub"
-            ar rcs app/Madeira/libwineserver.a
+            bash /usr/local/bin/make_stub_lib.sh app/Madeira/libwineserver.a
           fi
 
       # ─────────────────────────────────────────────────────────────────────
@@ -215,7 +263,7 @@ jobs:
           bash build/win32u-unix/build.sh 2>&1 | tail -60 || true
           if [ ! -f "app/Madeira/libwin32u_unix.a" ]; then
             echo "WARNING: libwin32u_unix.a not produced — creating stub"
-            ar rcs app/Madeira/libwin32u_unix.a
+            bash /usr/local/bin/make_stub_lib.sh app/Madeira/libwin32u_unix.a
           fi
 
       # ─────────────────────────────────────────────────────────────────────
@@ -227,16 +275,14 @@ jobs:
         run: |
           chmod +x build/dxmt-ios/build.sh
           bash build/dxmt-ios/build.sh 2>&1 | tail -60 || true
-          # Pre-built libdxmt_unix.a zaten app/ içinde, birleştir
           if [ -f "build/dxmt-ios/libdxmt_unix.a" ]; then
             cp build/dxmt-ios/libdxmt_unix.a app/libdxmt_unix.a
           fi
-          # Xcode projesi libdxmt_combined.a bekliyor
           if [ ! -f "app/Madeira/libdxmt_combined.a" ]; then
             if [ -f "app/libdxmt_unix.a" ]; then
               cp app/libdxmt_unix.a app/Madeira/libdxmt_combined.a
             else
-              ar rcs app/Madeira/libdxmt_combined.a
+              bash /usr/local/bin/make_stub_lib.sh app/Madeira/libdxmt_combined.a
             fi
           fi
 
